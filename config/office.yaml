@@ -1,0 +1,63 @@
+# The office: company, machines, departments, floor plan and the starting roster.
+# Employees are seeded into data/office.db on first run; after that edit them in the UI/CLI (the DB wins).
+# A new venture = a new department here + a folder under departments/ with a HANDLERS map. Nothing else changes.
+
+company:
+  name: Clip Desk
+  short: Clip Desk
+  owner: Boss               # shown on the CEO desk nameplate only
+
+machines:                   # who can run workers. `ollama` lets another machine's tier list reach this one's models.
+  pc:
+    label: Laptop (Windows)
+    kind: worker
+    ollama: http://<PC-TAILSCALE-IP>:11434      # reachable from the tailnet only if OLLAMA_HOST=0.0.0.0 is set on that machine
+    max_parallel: 1                             # CPU-only: one model call at a time per machine
+  mac:
+    label: HomeBase (Linux server)
+    kind: server
+    ollama: http://<MAC-TAILSCALE-IP>:11434
+    max_parallel: 1
+  phone:
+    label: Phone
+    kind: viewer
+
+departments:
+  clips: {title: Clip Desk, color: "#ef6a5b", blurb: "GTA 6 launch clips: find the moments, cut vertical, post on schedule."}
+
+# Floor plan in 16 px tiles. A corridor runs across rows 9-10. Rooms with a department get desks for that department's
+# staff; kind rooms are shared (break, ceo, server). The grid grows to fit the rooms.
+rooms:
+  - {id: clips,  title: Clip Desk,   department: clips, x: 1,  y: 1,  w: 14, h: 8}
+  - {id: break,  title: Break Room,  kind: break,       x: 1,  y: 12, w: 8,  h: 10}
+  - {id: ceo,    title: Your Office, kind: ceo,         x: 10, y: 12, w: 9,  h: 10}
+  - {id: server, title: Server Room, kind: server,      x: 20, y: 12, w: 8,  h: 10}
+
+# home = the machine that runs them first (pc | mac | any). backup = a machine that takes their tasks only after the home
+# machine has left one waiting 45 s. Footage and ffmpeg live on the laptop, so the Clip Desk runs there only.
+# tier = fast | smart (config/models.yaml). The DB wins over this file after first run.
+employees:
+  - name: Dex
+    role: clip_director
+    department: clips
+    home: pc
+    tier: fast
+    persona: "Calm under deadline. Splits the footage fairly and keeps the schedule honest."
+  - name: Rico
+    role: clipper
+    department: clips
+    home: pc
+    tier: smart
+    persona: "Punchy titles, no clickbait lies. Says what happens in the clip."
+  - name: Jax
+    role: clipper
+    department: clips
+    home: pc
+    tier: smart
+    persona: "Punchy titles, no clickbait lies. Says what happens in the clip."
+  - name: Pia
+    role: publisher
+    department: clips
+    home: pc
+    tier: fast
+    persona: "Methodical. Never posts early, never posts twice."

@@ -1,0 +1,23 @@
+# Two tiers. Each is tried in order; providers without a key and Ollama servers that are down or lack the model are skipped.
+#   ollama      = the Ollama on the machine running the worker (OLLAMA_URL, default localhost)
+#   ollama_pc / ollama_mac = that machine's Ollama from config/office.yaml, over Tailscale
+# Cloud keys (GROQ_API_KEY, GEMINI_API_KEY, OPENROUTER_API_KEY) go in .env. As of 2026-11-11 none of the keys on file worked,
+# so everything runs on local models until you add one. NVIDIA (NVIDIA_API_KEY, read from the Mac's homebase key file) is
+# supported by office/llm.py but left out here on purpose: customer messages would leave the machine. Add it if you want it.
+tiers:
+  fast:                      # short structured jobs: extraction, scoring, briefs
+    - {provider: ollama,     model: "gemma3:4b"}
+    - {provider: ollama,     model: "qwen3:1.7b"}
+    - {provider: ollama,     model: "gemma3:1b"}
+    - {provider: groq,       model: "llama-3.3-70b-versatile"}
+    - {provider: gemini,     model: "gemini-2.5-flash"}
+  smart:                     # titles, descriptions and anything people read
+    - {provider: groq,       model: "llama-3.3-70b-versatile"}
+    - {provider: gemini,     model: "gemini-2.5-flash"}
+    - {provider: openrouter, model: "openrouter/free"}
+    - {provider: ollama,     model: "qwen3:8b"}
+    - {provider: ollama,     model: "huihui_ai/deepseek-r1-abliterated:7b"}
+    - {provider: ollama_pc,  model: "qwen3:8b"}
+    - {provider: ollama_mac, model: "huihui_ai/deepseek-r1-abliterated:7b"}
+    - {provider: ollama,     model: "gemma3:4b"}
+    - {provider: ollama,     model: "qwen3:1.7b"}

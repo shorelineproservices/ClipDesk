@@ -1,0 +1,30 @@
+# Clip Desk (GTA 6 launch). Times are UTC. Release times come from press reports of Rockstar's staggered midnight-local
+# rollout: New Zealand first (00:00 NZDT Thu 19 Nov = 11:00 UTC Wed 18 Nov), US East 00:00 EST = 05:00 UTC Thu 19 Nov.
+# CHECK the PlayStation / Xbox store page before launch and edit post_after if the time moved.
+release:
+  nz:       "2026-11-18T11:00:00Z"
+  us_east:  "2026-11-19T05:00:00Z"
+  us_west:  "2026-11-19T08:00:00Z"
+post_after: "2026-11-18T11:00:00Z"      # nothing is posted before this moment (the NZ drop)
+
+# Footage goes in data/clips/inbox/ on the laptop: your own captures, or footage you have permission to use.
+# .mp4 .mov .mkv .webm. Add an optional notes file next to it (same name + .txt) saying what happens, e.g. "bank heist
+# chase, minute 12 onward"; the clippers use it for titles. Leave the file alone until it has finished copying.
+clip:
+  length_secs: 30             # each clip
+  lead_secs: 12               # seconds of build-up before the loud moment
+  per_chunk: 3                # clips cut from each chunk
+  chunk_minutes: 20           # the director splits long footage into chunks so both clippers work in parallel
+  min_gap_secs: 45            # no two clips from one source closer than this
+  crf: 23
+
+post:
+  enabled: true               # master switch. false = clips are cut and wait in data/clips/ready/ for you
+  max_per_day: 6              # YouTube's default API quota allows about 6 uploads a day
+  min_gap_minutes: 90         # spacing between posts
+  privacy: public             # public | unlisted | private
+  category_id: "20"           # Gaming
+  hashtags: ["#GTA6", "#Shorts"]
+  youtube:
+    client_secrets: data/client_secrets.json    # from Google Cloud console (YouTube Data API v3, Desktop OAuth)
+    token: data/youtube_token.json              # written by scripts/youtube_auth.py after you approve in the browser

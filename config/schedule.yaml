@@ -1,0 +1,4 @@
+# Recurring work the server queues on its own. First run happens right after install; after that every `every_hours`
+# (or at `at` local time on the server machine). Remove a line to stop it.
+- {key: clips_scan, role: clip_director, title: "Scan inbox, assign clips", every_hours: 0.25}
+- {key: clips_post, role: publisher,     title: "Post ready clips",         every_hours: 0.25}

@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0f1216">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>Clip Desk</title>
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="icon" href="/icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="/icon.svg">
+<link rel="stylesheet" href="/static/office.css">
+</head>
+<body>
+<header id="top">
+  <div class="brand"><span class="dot" id="conn" title="connection"></span><b id="title">Clip Desk</b><span id="clock"></span></div>
+  <div class="chips">
+    <span class="chip" id="chip-machines" title="machines"></span>
+    <button class="chip btn" id="btn-inbox" title="waiting for your OK">Inbox <b id="inbox-n">0</b></button>
+    <button class="chip btn accent" id="btn-task">+ Task</button>
+    <button class="chip btn" id="btn-panel" title="show or hide the side panel">☰</button>
+  </div>
+</header>
+<main id="main">
+  <div id="stage"><canvas id="floor" aria-label="the office floor"></canvas>
+    <div id="hint">tap a person to see what they are doing</div>
+  </div>
+  <aside id="panel">
+    <nav id="tabs">
+      <button data-tab="staff" class="on">Staff</button>
+      <button data-tab="inbox">Inbox</button>
+      <button data-tab="tasks">Tasks</button>
+      <button data-tab="clips">Clips</button>
+      <button data-tab="log">Log</button>
+      <button data-tab="new">New task</button>
+    </nav>
+    <section id="tab-staff" class="tab on"></section>
+    <section id="tab-inbox" class="tab"></section>
+    <section id="tab-tasks" class="tab"></section>
+    <section id="tab-clips" class="tab"></section>
+    <section id="tab-log" class="tab"></section>
+    <section id="tab-new" class="tab">
+      <form id="task-form">
+        <label>Who <select id="task-who"></select></label>
+        <label>What <textarea id="task-text" rows="5" placeholder="Describe the job in plain words"></textarea></label>
+        <div class="row"><button type="submit" class="primary">Send to the office</button><span id="task-msg"></span></div>
+        <p class="muted" id="task-hint"></p>
+      </form>
+    </section>
+  </aside>
+</main>
+<div id="toast"></div>
+<script src="/static/office.js"></script>
+</body>
+</html>
