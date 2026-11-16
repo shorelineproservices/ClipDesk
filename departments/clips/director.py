@@ -24,6 +24,7 @@ def run(task, ctx):
             continue
         notes_file = src.with_suffix(".txt")
         notes = notes_file.read_text(encoding="utf-8", errors="replace").strip()[:600] if notes_file.is_file() else ""
+        prov = C.parse_provenance(src)
         try:
             total = C.duration_secs(src)
         except RuntimeError as e:
@@ -35,7 +36,7 @@ def run(task, ctx):
         for i in range(n):
             a, b = i * chunk, min(total, (i + 1) * chunk)
             ctx.hq.add_task("clipper", f"Clip {src.name} {int(a // 60)}-{int(b // 60)} min",
-                            {"source": str(src), "start": a, "end": b, "notes": notes}, department="clips",
+                            {"source": str(src), "start": a, "end": b, "notes": notes, "provenance": prov}, department="clips",
                             priority=1, source="clips")
             queued.append(f"{src.name} {int(a // 60)}-{int(b // 60)}m")
         state[key] = {"jobs": n, "ts": time.time()}

@@ -3,6 +3,7 @@ spacing in config/clips.yaml. YouTube is the one platform wired up (free officia
 scripts/youtube_auth.py the clips simply wait in data/clips/ready/ and your phone gets one reminder a day."""
 import time
 from datetime import timedelta
+from pathlib import Path
 from office import notify
 from . import common as C
 
@@ -62,6 +63,35 @@ def refresh_views(post, f):
             C.write_clip(p, m)
 
 
+def eligible(meta, cfg):
+    """(True, '') when Pia may post this clip, else (False, reason). Pure — tested in tests/test_clips.py.
+
+    Blocks: not-ready / held clips, unknown or missing provenance, blocklist hits in
+    title/description/tags/transcript, and clips already posted (video_id set)."""
+    if not meta or meta.get("status") != "ready":
+        return False, f"status is {meta.get('status') if meta else 'missing'}, not ready"
+    if meta.get("video_id"):
+        return False, "already posted (video_id set)"
+    prov = meta.get("provenance") or {}
+    perm = C.normalize_permission(prov.get("permission")) if isinstance(prov, dict) else "unknown"
+    if (cfg.get("provenance") or {}).get("required", True) and perm == "unknown":
+        return False, "provenance: unknown — no permission declared"
+    hits = C.matches_blocklist(" ".join([str(meta.get("title", "")), str(meta.get("description", "")),
+                                         " ".join(meta.get("tags") or []), str(meta.get("transcript", ""))]),
+                               cfg.get("blocklist") or [])
+    if hits:
+        return False, f"blocklist: {', '.join(hits)}"
+    return True, ""
+
+
+def _already_posted(meta, f):
+    """Idempotency: a clip with the same file stem already in posted/, or a video_id, was posted."""
+    if meta.get("video_id"):
+        return True
+    stem = Path(meta.get("file", "")).stem
+    return bool(stem) and ((f["posted"] / f"{stem}.json").is_file() or (f["posted"] / f"{stem}.mp4").is_file())
+
+
 def run(task, ctx):
     c, f = C.cfg(), C.folders()
     try:
@@ -70,8 +100,10 @@ def run(task, ctx):
         pass                                   # stats are a nicety; never block posting on them
     post = c.get("post") or {}
     if not post.get("enabled"):
+        C.log_skip_log("auto-post off", "post.enabled is false in config/clips.yaml")
         return {"text": "Auto-post is off in config/clips.yaml; clips wait in data/clips/ready/."}
     if C.now_utc() < C.parse_ts(c["post_after"]):
+        C.log_skip_log("embargo", f"until {c['post_after']} UTC")
         return {"text": f"Embargo until {c['post_after']} UTC. {C.countdown(c)}."}
     opened = C.BASE / "launched.txt"
     if not opened.exists():
@@ -83,12 +115,30 @@ def run(task, ctx):
     cutoff = time.time() - 86400
     today = [m for m in posted if m.get("posted_at", 0) > cutoff]
     if not ready:
+        C.log_skip_log("nothing waiting", f"{len(posted)} posted so far")
         return {"text": f"Nothing waiting. {len(posted)} posted so far."}
+    # Gate every waiting clip: held / unknown-provenance / blocklisted / already-posted clips are
+    # logged and skipped, and Pia moves on to the next eligible one instead of stalling behind them.
+    skipped = []
+    for m, p in ready:
+        ok, reason = eligible(m, c)
+        if _already_posted(m, f):
+            ok, reason = False, "already posted (same file in posted/)"
+        if not ok:
+            C.log_clip_skip(m, reason)
+            C.write_clip(p, m)
+            C.log_skip_log("clip skipped", f"{m.get('file', p.name)}: {reason}")
+            skipped.append(f"{m.get('file', p.name)}: {reason}")
+    ready = [(m, p) for m, p in ready if eligible(m, c)[0] and not _already_posted(m, f)]
+    if not ready:
+        return {"text": f"Nothing eligible to post ({len(skipped)} skipped: " + "; ".join(skipped) + ")."}
     if len(today) >= int(post.get("max_per_day", 6)):
+        C.log_skip_log("daily cap", f"{len(today)} posted in 24 h; {len(ready)} eligible waiting")
         return {"text": f"Daily cap reached ({len(today)} in 24 h); {len(ready)} waiting."}
     last = max([m.get("posted_at", 0) for m in posted] or [0])
     gap = int(post.get("min_gap_minutes", 90)) * 60
     if time.time() - last < gap:
+        C.log_skip_log("spacing", f"next post in {int((gap - (time.time() - last)) // 60)} min")
         return {"text": f"Spacing: next post in {int((gap - (time.time() - last)) // 60)} min; {len(ready)} waiting."}
     try:
         service = _service(post)
@@ -96,6 +146,7 @@ def run(task, ctx):
         service = None
         ctx.say(f"YouTube login problem: {type(e).__name__}")
     if service is None:
+        C.log_skip_log("youtube not connected", "run scripts/youtube_auth.py")
         flag = C.BASE / "reminded.txt"
         day = time.strftime("%Y-%m-%d")
         if not flag.exists() or flag.read_text().strip() != day:
@@ -103,6 +154,14 @@ def run(task, ctx):
             flag.write_text(day)
         return {"text": f"{len(ready)} clip(s) ready; YouTube not connected (run scripts/youtube_auth.py)."}
     meta, meta_path = ready[0]
+    # Final idempotency re-check right before upload: never upload the same clip twice,
+    # even if a previous run crashed between the API call and moving the files.
+    ok, reason = eligible(meta, c)
+    if not ok or _already_posted(meta, f):
+        C.log_clip_skip(meta, reason or "already posted (same file in posted/)")
+        C.write_clip(meta_path, meta)
+        C.log_skip_log("clip skipped", f"{meta.get('file', meta_path.name)}: {reason or 'already posted'}")
+        return {"text": f"Skipped {meta.get('file', meta_path.name)}: {reason or 'already posted'}."}
     mp4 = f["ready"] / meta["file"]
     ctx.say(f"posting: {meta['title']}")
     try:
@@ -111,6 +170,7 @@ def run(task, ctx):
         meta["attempts"] = int(meta.get("attempts", 0)) + 1
         meta["last_error"] = f"{type(e).__name__}: {str(e)[:200]}"
         if "quotaExceeded" in str(e) or "uploadLimitExceeded" in str(e):
+            C.log_skip_log("quota/channel-limit error", str(e)[:200])
             C.write_clip(meta_path, meta)
             return {"text": "YouTube quota reached for today; will retry later."}
         if meta["attempts"] >= FAIL_LIMIT:
@@ -120,6 +180,9 @@ def run(task, ctx):
     meta.update(status="posted", posted_at=time.time(), platform="youtube", video_id=vid, url=f"https://youtube.com/shorts/{vid}")
     C.write_clip(f["posted"] / meta_path.name, meta)
     mp4.replace(f["posted"] / mp4.name)
+    for side in (f["ready"] / f"{Path(meta['file']).stem}.thumb.jpg", f["ready"] / f"{Path(meta['file']).stem}.ass"):
+        if side.is_file():
+            side.replace(f["posted"] / side.name)
     meta_path.unlink()
     notify.push("Clip posted", f"{meta['title']}\n{meta['url']}", "default", ["clapper"])
     return {"video": vid, "url": meta["url"], "text": f"Posted: {meta['title']} {meta['url']}"}

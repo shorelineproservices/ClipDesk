@@ -38,14 +38,18 @@ def loud_moments(src, start, end, picks, min_gap):
     return [(start + s, sc) for s, sc in chosen]
 
 
-def describe(ctx, notes, stem, hashtags):
-    """Title, description, tags from what the owner said happens in the footage. Never invents plot or leaks."""
-    system = ("You write YouTube Shorts metadata for Grand Theft Auto VI gameplay clips. Use ONLY facts in the notes; if the "
-              "notes are empty, say nothing specific about story, missions or characters. No clickbait claims, no 'leaked', no "
-              "spoiler warnings you cannot back up. Reply with JSON only: "
+def describe(ctx, notes, stem, hashtags, transcript=""):
+    """Title, description, tags from what the owner said happens in the footage, plus the Whisper
+    transcript of what was actually said. Never invents plot or leaks."""
+    system = ("You write YouTube Shorts metadata for Grand Theft Auto VI gameplay clips. Use ONLY facts in the notes "
+              "and the transcript; if both are empty, say nothing specific about story, missions or characters. "
+              "No clickbait claims, no 'leaked', no spoiler warnings you cannot back up. Reply with JSON only: "
               '{"title": "max 70 chars, plain and punchy", "description": "2 short sentences", "tags": ["5 to 8 short tags"]}')
+    content = f"Footage name: {stem}\nNotes from the owner: {notes or '(none)'}"
+    if transcript:
+        content += f"\nTranscript of what was said in the footage: {transcript[:1200]}"
     try:
-        raw = ctx.llm([{"role": "user", "content": f"Footage name: {stem}\nNotes from the owner: {notes or '(none)'}"}], max_tokens=300, system=system)
+        raw = ctx.llm([{"role": "user", "content": content}], max_tokens=300, system=system)
         j = json_from(raw) or {}
     except Exception:
         j = {}
@@ -56,6 +60,15 @@ def describe(ctx, notes, stem, hashtags):
     return title, (desc + "\n\n" + " ".join(hashtags)).strip(), tags
 
 
+from . import common as C
+from . import transcribe as T
+
+
+def _ffmpeg_sub_path(path):
+    """Escape a path for ffmpeg's subtitles filter (Windows drive colons, backslashes, quotes)."""
+    return str(path).replace("\\", "/").replace(":", "\\:").replace("'", "\\'")
+
+
 def run(task, ctx):
     inp = ctx.input
     src = Path(inp["source"])
@@ -63,10 +76,45 @@ def run(task, ctx):
         raise FileNotFoundError(f"footage not found: {src.name}")
     c, f = C.cfg(), C.folders()
     clip = c.get("clip") or {}
+    caps_cfg = c.get("captions") or {}
+    block_terms = c.get("blocklist") or []
+    notes = inp.get("notes", "")
+    prov = inp.get("provenance") or C.parse_provenance(src)
     start, end = float(inp.get("start", 0)), float(inp.get("end") or C.duration_secs(src))
     length, lead = float(clip.get("length_secs", 30)), float(clip.get("lead_secs", 12))
     ctx.say(f"listening for the big moments in {src.name} ({int(start // 60)}-{int(end // 60)} min)")
-    moments = loud_moments(src, start, end, int(clip.get("per_chunk", 3)), float(clip.get("min_gap_secs", 45)))
+    # Spoiler / leak blocklist on what the owner wrote about the footage: the clip is still cut
+    # so a human can review it, but it is HELD and Pia will never auto-post it.
+    held_reasons = []
+    hits = C.matches_blocklist(f"{src.stem} {notes}", block_terms)
+    if hits:
+        held_reasons.append(f"blocklist: {', '.join(hits)}")
+    if (c.get("provenance") or {}).get("required", True) and prov.get("permission") == "unknown":
+        held_reasons.append("provenance: unknown — no permission declared for this footage")
+    base_held_reasons = list(held_reasons)
+    # 1. Whisper transcription (optional) + Ollama scoring; falls back to loudness only.
+    segments, transcript = None, ""
+    tr_cfg = c.get("transcription") or {}
+    if tr_cfg.get("enabled", True):
+        if T.whisper_available():
+            ctx.say("transcribing this chunk so moments are scored on what was said, not just loudness")
+            try:
+                segments = T.transcribe(src, start, end, tr_cfg.get("model", "tiny"), tr_cfg.get("language", ""))
+                transcript = T.transcript_text(segments)
+                if segments:
+                    ctx.say(f"transcript: {len(segments)} segments, {len(transcript)} chars")
+            except Exception as e:
+                ctx.say(f"transcription failed, falling back to loudness only: {type(e).__name__}")
+                segments = None
+        else:
+            ctx.say("faster-whisper not installed — picking moments by loudness only (pip install faster-whisper)")
+    loud = loud_moments(src, start, end, int(clip.get("per_chunk", 3)), float(clip.get("min_gap_secs", 45)))
+    moments = loud
+    if segments:
+        scored = T.score_moments(ctx, segments, loud, notes)
+        if scored:
+            moments = T.merge_moments(loud, scored, int(clip.get("per_chunk", 3)), float(clip.get("min_gap_secs", 45)))
+            ctx.say(f"scored {len(scored)} transcript moment(s); using {len(moments)} moment(s)")
     if not moments:
         ctx.say("nothing stood out in this chunk")
         return {"clips": [], "text": f"No standout audio moments in {src.name} {int(start // 60)}-{int(end // 60)} min."}
@@ -77,13 +125,45 @@ def run(task, ctx):
         mp4, meta = f["ready"] / f"{name}.mp4", f["ready"] / f"{name}.json"
         if meta.exists():
             continue
-        ctx.say(f"cutting {name} (peak +{score:.0f} dB)")
-        C.run_ffmpeg(["-ss", str(t0), "-t", str(length), "-i", str(src), "-filter_complex", VERTICAL, "-map", "[v]", "-map", "0:a?",
+        ctx.say(f"cutting {name} (score {score:.1f})")
+        # Captions: ASS subtitles for this clip window, burned in with the subtitles filter.
+        ass_path = None
+        if caps_cfg.get("enabled", True) and segments:
+            cue_segs = C.clip_segments(segments, t0, length)
+            if cue_segs:
+                ass_path = f["ready"] / f"{name}.ass"
+                ass_path.write_text(C.segments_to_ass(cue_segs, caps_cfg), encoding="utf-8")
+        if ass_path:
+            filt = VERTICAL + f"[v]subtitles='{_ffmpeg_sub_path(ass_path)}'[vout]"
+            out_map = "[vout]"
+        else:
+            filt, out_map = VERTICAL, "[v]"
+        C.run_ffmpeg(["-ss", str(t0), "-t", str(length), "-i", str(src), "-filter_complex", filt, "-map", out_map, "-map", "0:a?",
                       "-c:v", "libx264", "-preset", "veryfast", "-crf", str(clip.get("crf", 23)), "-c:a", "aac", "-b:a", "160k",
                       "-movflags", "+faststart", str(mp4)])
-        title, description, tags = describe(ctx, inp.get("notes", ""), src.stem, (c.get("post") or {}).get("hashtags") or [])
-        C.write_clip(meta, {"status": "ready", "file": mp4.name, "title": title, "description": description, "tags": tags,
-                            "source": src.name, "at_secs": round(at, 1), "score_db": round(score, 1), "made_by": ctx.name,
-                            "created": time.time(), "attempts": 0})
-        made.append({"name": name, "title": title})
-    return {"clips": made, "text": f"{len(made)} clip(s) ready from {src.name}: " + "; ".join(m["title"] for m in made)}
+        # Thumbnail: sharpest frame near the clip midpoint.
+        thumb_name = None
+        try:
+            thumb = C.pick_thumbnail(mp4, length / 2, f["ready"] / f"{name}.thumb.jpg")
+            thumb_name = thumb.name
+        except Exception as e:
+            ctx.say(f"thumbnail skipped for {name}: {type(e).__name__}")
+        title, description, tags = describe(ctx, notes, src.stem, (c.get("post") or {}).get("hashtags") or [], transcript)
+        # Blocklist on the finished title too (model output can echo a blocked term).
+        held_reasons = list(base_held_reasons)
+        title_hits = C.matches_blocklist(f"{title} {description}", block_terms)
+        if title_hits:
+            held_reasons.append(f"blocklist in title: {', '.join(title_hits)}")
+        status = "held" if held_reasons else "ready"
+        meta_data = {"status": status, "file": mp4.name, "title": title, "description": description, "tags": tags,
+                     "source": src.name, "at_secs": round(at, 1), "score_db": round(score, 1), "made_by": ctx.name,
+                     "created": time.time(), "attempts": 0, "provenance": prov,
+                     "transcript": transcript[:600], "captions": bool(ass_path), "thumbnail": thumb_name}
+        if held_reasons:
+            meta_data["hold_reason"] = "; ".join(dict.fromkeys(held_reasons))
+            C.log_clip_skip(meta_data, meta_data["hold_reason"])
+        C.write_clip(meta, meta_data)
+        made.append({"name": name, "title": title, "status": status})
+    held = sum(1 for m in made if m["status"] == "held")
+    return {"clips": made, "text": f"{len(made)} clip(s) ready from {src.name}" + (f" ({held} held for review)" if held else "") +
+            ": " + "; ".join(m["title"] for m in made)}

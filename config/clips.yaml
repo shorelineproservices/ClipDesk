@@ -10,6 +10,53 @@ post_after: "2026-11-18T11:00:00Z"      # nothing is posted before this moment (
 # Footage goes in data/clips/inbox/ on the laptop: your own captures, or footage you have permission to use.
 # .mp4 .mov .mkv .webm. Add an optional notes file next to it (same name + .txt) saying what happens, e.g. "bank heist
 # chase, minute 12 onward"; the clippers use it for titles. Leave the file alone until it has finished copying.
+# Transcription + scoring (free, local). faster-whisper is optional: if it is not installed the clippers
+# fall back to audio-only loudness picking, exactly as before. Install with: pip install faster-whisper
+transcription:
+  enabled: true
+  model: "tiny"               # faster-whisper model: tiny is fastest, small/base are more accurate
+  language: ""                # "" = auto-detect; set "en" to force English
+
+# Burned-in captions from the Whisper transcript (word-level when available, else segment-level).
+captions:
+  enabled: true
+  font_name: "Arial"
+  font_size: 48
+  bold: true
+  alignment: 2                # 2 = bottom-centre
+  margin_v: 140               # pixels up from the bottom edge (1080x1920 canvas)
+  outline: 2
+  max_chars_per_line: 42
+  max_words_per_cue: 8
+
+# Provenance: every clip must carry a source permission. Allowed values:
+#   own | rockstar-official | permission-granted | creative-commons
+# Anything else (including missing) is UNKNOWN and Pia will never auto-post it.
+# Declare it in the inbox sidecar <footage>.json {"permission": "...", "source": "...", "credit": "...", "source_url": "..."}
+# or as a "permission: own" line in the <footage>.txt notes file.
+provenance:
+  required: true
+  allowed: ["own", "rockstar-official", "permission-granted", "creative-commons"]
+
+# Spoiler / leak blocklist. If a clip's notes, transcript or title matches any term, the clip is HELD
+# for manual review and never auto-posted. Terms are matched case-insensitively as substrings.
+blocklist:
+  - "leak"
+  - "leaked"
+  - "pre-release"
+  - "prerelease"
+  - "ending"
+  - "spoiler"
+  - "cutscene-only"
+  - "isolated cutscene"
+  - "in-game tv"
+  - "in game tv"
+  - "cheat"
+  - "mod menu"
+  - "cracked"
+  - "early access download"
+  - "fake download"
+
 clip:
   length_secs: 30             # each clip
   lead_secs: 12               # seconds of build-up before the loud moment

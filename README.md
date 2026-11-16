@@ -9,8 +9,8 @@ Pure Python standard library plus `pyyaml`, SQLite for the ledger, ffmpeg for vi
 | Name | Role | What they do |
 |---|---|---|
 | Dex | clip_director | Every 15 minutes scans `data/clips/inbox/` for new footage, splits long files into 20-minute chunks, queues one clipper job per chunk, and files a status report for the Clips tab. |
-| Rico, Jax | clipper | Take chunks as they free up. Find the loudest moments (audio spikes over the local average), cut 30 s 9:16 clips with a blurred backdrop, then write title, description and tags from your notes. Clips land in `data/clips/ready/`. |
-| Pia | publisher | Posts at most one ready clip per check: not before `post_after`, at most `max_per_day`, spaced `min_gap_minutes` apart. Uploads through the YouTube Data API, refreshes view counts hourly, and pushes each post to your phone. |
+| Rico, Jax | clipper | Take chunks as they free up. Transcribe them with faster-whisper when installed and ask local Ollama to score the moments on what was actually said (falling back to loudness when it is not), cut 30 s 9:16 clips with a blurred backdrop and burned-in captions, pick a thumbnail frame, then write title, description and tags from your notes and the transcript only. Clips land in `data/clips/ready/`. |
+| Pia | publisher | Posts at most one ready clip per check: not before `post_after`, at most `max_per_day`, spaced `min_gap_minutes` apart. Skips — and logs the reason in `data/clips/publisher_skip_log.jsonl` — any clip whose provenance is unknown, that matches the spoiler/leak blocklist, or that was already posted; never re-uploads the same clip. Uploads through the YouTube Data API, refreshes view counts hourly, and pushes each post to your phone. |
 
 ## How it fits together
 
@@ -42,6 +42,7 @@ On Windows, `scripts\start_office.ps1` and `scripts\start_worker.ps1 -Local` do 
 ## Using it
 
 1. Put footage in `data/clips/inbox/` (`.mp4 .mov .mkv .webm`). Optional: a text file with the same name saying what happens ("bank heist chase from minute 12"). The clippers use it for titles and are told never to invent plot.
+   Declare the footage's permission, or Pia will not post it: a `<footage>.json` sidecar `{"permission": "own" | "rockstar-official" | "permission-granted" | "creative-commons", "source": "...", "credit": "..."}` next to the file, or a `permission: own` line in its `.txt` notes file. `python scripts/provenance_audit.py` lists every clip by permission status.
 2. Dex picks it up within 15 minutes. Watch Rico and Jax work, or open the **Clips** tab.
 3. To post: create a Google Cloud OAuth client (YouTube Data API v3, type Desktop), save it as `data/client_secrets.json`, run `python scripts/youtube_auth.py` once and approve in the browser. Until then clips wait in `data/clips/ready/`.
 4. `python scripts/clips_check.py` lists what is still missing before launch.
@@ -52,7 +53,9 @@ On Windows, `scripts\start_office.ps1` and `scripts\start_worker.ps1 -Local` do 
 
 ## Limits
 
-- Clip picking is audio-only, so quiet or purely visual moments get missed. A vision model would be the next upgrade.
+- Clip picking scores transcript moments with local Ollama when faster-whisper is installed (`pip install faster-whisper`); without it, picking is audio-only, so quiet or purely visual moments get missed. A vision model would be the next upgrade.
+- Captions are burned in from the Whisper transcript (toggle `captions.enabled` in `config/clips.yaml`). They need ffmpeg with the `subtitles` filter (libass); if your ffmpeg lacks it, turn captions off and the clips still cut.
+- Provenance is a hard gate, not a suggestion: a clip with no declared permission, or one matching the spoiler/leak blocklist in `config/clips.yaml`, is held for manual review and never auto-posted.
 - YouTube's default API quota allows about 6 uploads a day. TikTok and Instagram have no free open upload route and are not wired up.
 - Use footage you own or have permission to use. Game publishers' rules and YouTube's copyright system still apply.
 - The worker machine must stay on and awake while posting is open.

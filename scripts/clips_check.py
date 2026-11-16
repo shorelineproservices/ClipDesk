@@ -20,6 +20,26 @@ try:
     ok("google libraries", True)
 except ImportError:
     ok("google libraries", False, "pip install google-api-python-client google-auth-oauthlib")
+try:
+    import faster_whisper
+    ok("faster-whisper (transcription)", True)
+except ImportError:
+    ok("faster-whisper (transcription)", False, "optional: pip install faster-whisper — without it clips are picked by loudness only")
+try:
+    import urllib.request as _u, json as _j
+    _u.urlopen((__import__("os").environ.get("OLLAMA_URL") or "http://127.0.0.1:11434") + "/api/tags", timeout=3)
+    ok("Ollama reachable (moment scoring)", True)
+except Exception:
+    ok("Ollama reachable (moment scoring)", False, "optional: start Ollama — without it clips are picked by loudness only")
+ok("captions enabled", bool((c.get("captions") or {}).get("enabled", True)), "set captions.enabled: true in config/clips.yaml")
+ok(f"blocklist terms ({len(c.get('blocklist') or [])})", bool(c.get("blocklist")), "add terms under blocklist: in config/clips.yaml")
+n_unknown = 0
+for _p in f["ready"].glob("*.json"):
+    _m = C.read_clip(_p) or {}
+    _prov = _m.get("provenance") or {}
+    if C.normalize_permission(_prov.get("permission")) == "unknown":
+        n_unknown += 1
+ok(f"ready clips with unknown provenance ({n_unknown})", n_unknown == 0, "python scripts/provenance_audit.py — declare permission per clip")
 ok("client_secrets.json", (ROOT / yt.get("client_secrets", "data/client_secrets.json")).is_file(), "Google Cloud console: YouTube Data API v3, OAuth client type Desktop, save as data/client_secrets.json")
 ok("YouTube login (token)", (ROOT / yt.get("token", "data/youtube_token.json")).is_file(), "python scripts/youtube_auth.py")
 ok("auto-post enabled", bool(post.get("enabled")), "set post.enabled: true in config/clips.yaml")
