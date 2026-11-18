@@ -40,6 +40,29 @@ for _p in f["ready"].glob("*.json"):
     if C.normalize_permission(_prov.get("permission")) == "unknown":
         n_unknown += 1
 ok(f"ready clips with unknown provenance ({n_unknown})", n_unknown == 0, "python scripts/provenance_audit.py — declare permission per clip")
+n_held_dup = 0
+for _p in f["ready"].glob("*.json"):
+    _m = C.read_clip(_p) or {}
+    if _m.get("status") == "held" and "duplicate" in str(_m.get("hold_reason", "")):
+        n_held_dup += 1
+ok(f"clips held as duplicates ({n_held_dup})", True, "re-cut the moment — do not re-upload the same file")
+_fb = C.load_feedback()
+ok(f"feedback file present ({len(_fb.get('clips', {}))} clip(s) tracked)", (C.BASE / "feedback.json").is_file(), "Pia writes data/clips/feedback.json hourly once clips are posted; python scripts/feedback_report.py to read it")
+n_social = sum(1 for _p in f["ready"].glob("*.social.txt"))
+_n_ready_now = len(list(f["ready"].glob("*.mp4")))
+ok(f"ready clips with a TikTok/IG sidecar ({n_social})", _n_ready_now == 0 or n_social >= _n_ready_now, "re-cut the clip to generate its .social.txt — python scripts/hand_post_kit.py")
+# __pycache__ / .pytest_cache regenerate on every Python run, so "present on disk" is
+# not the failure — the failure is them being TRACKED (as happened in the e3409a5 API
+# push, which does not read .gitignore). Check git-tracked files; fall back to a disk
+# scan only when this is not a git checkout.
+import subprocess as _sp
+_tracked_dirty = []
+try:
+    _tracked = _sp.run(["git", "-C", str(ROOT), "ls-files"], capture_output=True, text=True, timeout=10).stdout.splitlines()
+    _tracked_dirty = [t for t in _tracked if "__pycache__" in t or ".pytest_cache" in t or t.endswith(".pyc")]
+except Exception:
+    _tracked_dirty = [str(p) for gen in (ROOT.rglob("__pycache__"), ROOT.rglob(".pytest_cache")) for p in gen if ".git" not in str(p)]
+ok("no __pycache__ / .pytest_cache tracked by git", not _tracked_dirty, "git rm -r --cached <dir>; delete the dirs before pushing — the GitHub API push script does not read .gitignore")
 ok("client_secrets.json", (ROOT / yt.get("client_secrets", "data/client_secrets.json")).is_file(), "Google Cloud console: YouTube Data API v3, OAuth client type Desktop, save as data/client_secrets.json")
 ok("YouTube login (token)", (ROOT / yt.get("token", "data/youtube_token.json")).is_file(), "python scripts/youtube_auth.py")
 ok("auto-post enabled", bool(post.get("enabled")), "set post.enabled: true in config/clips.yaml")

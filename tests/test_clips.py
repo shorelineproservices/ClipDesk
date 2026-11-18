@@ -139,3 +139,84 @@ class TestThumbnail:
                       "-c:v", "libx264", "-pix_fmt", "yuv420p", str(src)])
         out = C.pick_thumbnail(src, 3.0, tmp_path / "test.thumb.jpg")
         assert out.is_file() and out.stat().st_size > 1000
+
+
+class TestDuplicateHash:
+    def test_average_hash_all_dark_vs_all_light(self):
+        assert C.average_hash_from_gray(bytes([0] * 64)) == 0
+        assert C.average_hash_from_gray(bytes([255] * 64)) == 0  # uniform: nothing above the mean
+        half = bytes([0] * 32 + [255] * 32)
+        h = C.average_hash_from_gray(half)
+        assert h is not None and bin(h).count("1") == 32
+
+    def test_hamming_distance(self):
+        assert C.hamming_distance(0b1010, 0b1000) == 1
+        assert C.hamming_distance(0, 0) == 0
+        assert C.hamming_distance(0, (1 << 64) - 1) == 64
+
+    def test_is_duplicate_needs_two_matching_frames(self):
+        base = [0b1111000011110000, 0b1010101010101010, 0b1100110011001100]
+        same = list(base)
+        dup, dist, matches = C.is_duplicate(same, [base])
+        assert dup and dist == 0 and matches == 3
+        # One matching frame is not enough on its own (needs 2 of 3).
+        one_off = [base[0], 0, 0]
+        dup, _, matches = C.is_duplicate(one_off, [base])
+        assert not dup and matches == 1
+        # Completely different pictures are not duplicates.
+        other = [0b0000111100001111, 0b0101010101010101, 0b0011001100110011]
+        assert not C.is_duplicate(other, [base])[0]
+
+    def test_clip_hashes_identical_files_match(self, tmp_path):
+        a = tmp_path / "a.mp4"
+        C.run_ffmpeg(["-f", "lavfi", "-i", "testsrc=duration=30:size=640x360:rate=30",
+                      "-c:v", "libx264", "-pix_fmt", "yuv420p", str(a)])
+        b = tmp_path / "b.mp4"
+        b.write_bytes(a.read_bytes())
+        ha, hb = C.clip_hashes(a, (5, 15, 25)), C.clip_hashes(b, (5, 15, 25))
+        assert len(ha) == 3 and ha == hb
+        assert C.is_duplicate(ha, [hb])[0]
+
+    def test_clip_hashes_different_colour_not_duplicate(self, tmp_path):
+        a = tmp_path / "a.mp4"
+        C.run_ffmpeg(["-f", "lavfi", "-i", "testsrc=duration=30:size=640x360:rate=30",
+                      "-c:v", "libx264", "-pix_fmt", "yuv420p", str(a)])
+        b = tmp_path / "b.mp4"
+        C.run_ffmpeg(["-f", "lavfi", "-i", "color=c=red:duration=30:size=640x360:rate=30",
+                      "-c:v", "libx264", "-pix_fmt", "yuv420p", str(b)])
+        ha, hb = C.clip_hashes(a, (5, 15, 25)), C.clip_hashes(b, (5, 15, 25))
+        assert ha and hb and not C.is_duplicate(ha, [hb])[0]
+
+
+class TestFeedback:
+    def test_record_only_reached_window_and_once(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(C, "BASE", tmp_path)
+        meta = {"title": "T", "file": "c.mp4", "posted_at": 1000.0}
+        assert C.record_feedback_reading("vid1", meta, 10, ts=1000.0 + 1800) is None  # <1h: nothing
+        assert C.record_feedback_reading("vid1", meta, 100, ts=1000.0 + 3600) == "1h"
+        assert C.record_feedback_reading("vid1", meta, 150, ts=1000.0 + 4000) is None  # same window again
+        assert C.record_feedback_reading("vid1", meta, 900, ts=1000.0 + 86400) == "24h"
+        fb = C.load_feedback()
+        assert fb["clips"]["vid1"]["readings"]["1h"]["views"] == 100
+        assert fb["clips"]["vid1"]["readings"]["24h"]["views"] == 900
+
+    def test_record_needs_posted_at_and_video_id(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(C, "BASE", tmp_path)
+        assert C.record_feedback_reading("", {"posted_at": 1}, 5, ts=99999) is None
+        assert C.record_feedback_reading("v", {"posted_at": 0}, 5, ts=99999) is None
+
+
+class TestSocial:
+    def test_caption_has_title_credit_and_hashtags(self):
+        cap = C.social_caption("GTA 6 Map Size", "Big map. #GTA6", ["GTA6", "map"],
+                               {"credit": "Rockstar Games"}, "tiktok")
+        assert "GTA 6 Map Size" in cap and "Footage: Rockstar Games" in cap
+        assert "#GTA6" in cap and "#Leonida" in cap and len(cap) <= 2200
+
+    def test_caption_without_provenance_has_no_credit_line(self):
+        cap = C.social_caption("T", "D", ["x"], None, "instagram")
+        assert "Footage:" not in cap and "Follow @LeonidaAfterDarkPlays" in cap
+
+    def test_platform_status(self):
+        assert C.platform_status({"posted_platforms": {"tiktok": True}}) == {"tiktok": True, "instagram": False}
+        assert C.platform_status({}) == {"tiktok": False, "instagram": False}

@@ -41,7 +41,9 @@ def upload(service, mp4, meta, post):
 
 
 def refresh_views(post, f):
-    """Hourly: copy view counts of posted clips into their sidecars (needs the readonly scope; silently skipped without it)."""
+    """Hourly: copy view counts of posted clips into their sidecars (needs the readonly scope; silently skipped without it).
+    Also records each clip's views/likes/comments into data/clips/feedback.json at the A/B-lab windows (1h/24h/72h/7d)
+    — one reading per window, real YouTube API numbers only, never invented."""
     flag = C.BASE / "stats_at.txt"
     try:
         if time.time() - float(flag.read_text()) < 3600:
@@ -56,11 +58,21 @@ def refresh_views(post, f):
         return
     ids = [m["video_id"] for _, m in metas[-50:]]
     rows = service.videos().list(part="statistics", id=",".join(ids)).execute().get("items", [])
-    views = {r["id"]: int(r["statistics"].get("viewCount", 0)) for r in rows}
+    stats = {r["id"]: r["statistics"] for r in rows}
+    fb_cfg = (C.cfg().get("feedback") or {})
     for p, m in metas:
-        if m["video_id"] in views:
-            m["views"] = views[m["video_id"]]
-            C.write_clip(p, m)
+        st = stats.get(m["video_id"])
+        if not st:
+            continue
+        m["views"] = int(st.get("viewCount", 0))
+        m["likes"] = int(st.get("likeCount", 0))
+        m["comments"] = int(st.get("commentCount", 0))
+        C.write_clip(p, m)
+        if fb_cfg.get("enabled", True):
+            try:
+                C.record_feedback_reading(m["video_id"], m, m["views"], m["likes"], m["comments"])
+            except Exception:
+                pass
 
 
 def eligible(meta, cfg):
@@ -180,7 +192,8 @@ def run(task, ctx):
     meta.update(status="posted", posted_at=time.time(), platform="youtube", video_id=vid, url=f"https://youtube.com/shorts/{vid}")
     C.write_clip(f["posted"] / meta_path.name, meta)
     mp4.replace(f["posted"] / mp4.name)
-    for side in (f["ready"] / f"{Path(meta['file']).stem}.thumb.jpg", f["ready"] / f"{Path(meta['file']).stem}.ass"):
+    for side in (f["ready"] / f"{Path(meta['file']).stem}.thumb.jpg", f["ready"] / f"{Path(meta['file']).stem}.ass",
+                 f["ready"] / f"{Path(meta['file']).stem}.social.txt"):
         if side.is_file():
             side.replace(f["posted"] / side.name)
     meta_path.unlink()

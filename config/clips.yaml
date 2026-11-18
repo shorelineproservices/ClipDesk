@@ -57,6 +57,33 @@ blocklist:
   - "early access download"
   - "fake download"
 
+# Duplicate detection: perceptual (average) hash of frames sampled from each cut clip.
+# A new clip is HELD as a duplicate when at least min_matching_frames sampled frames are
+# within hamming_threshold bits of an already-ready or already-posted clip. Pure stdlib +
+# ffmpeg, no new dependency. A re-cut of the same moment with a new hook is NOT a duplicate
+# unless the pictures match — re-cut, don't re-upload the same file.
+duplicates:
+  enabled: true
+  hamming_threshold: 6        # bits out of 64; 6 is tight — same footage re-encoded, not same topic
+  min_matching_frames: 2
+  sample_times_secs: [5, 15, 25]
+
+# View-count feedback loop (A/B lab): Pia records real YouTube API view/like/comment
+# counts into data/clips/feedback.json at 1h / 24h / 72h / 7d after posting. Nothing is
+# invented — scripts/feedback_report.py only reports what is in that file (plus Studio
+# numbers the owner pastes in with --record). See experiments/ab-testing.md in the
+# LeonidaAfterDark repo for the decision rules (1,000 views / 72h, >=15% lift, >=4/5 pairs).
+feedback:
+  enabled: true
+  windows: ["1h", "24h", "72h", "7d"]
+
+# Multi-platform hand-post kit: the same 9:16 file works on TikTok/Instagram. The clipper
+# writes a <clip>.social.txt sidecar (TikTok + Instagram captions, credit line, hashtags).
+# Nothing auto-posts there — scripts/hand_post_kit.py lists what is still unposted, and
+# --mark-posted records it after you post by hand. No TikTok/Instagram API credentials.
+social:
+  hashtags: ["GTA6", "GTA6Shorts", "Leonida", "ViceCity", "Gaming"]
+
 clip:
   length_secs: 30             # each clip
   lead_secs: 12               # seconds of build-up before the loud moment

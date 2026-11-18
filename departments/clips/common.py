@@ -97,6 +97,176 @@ def matches_blocklist(text, terms):
     return [t for t in (terms or []) if str(t).strip().lower() in hay]
 
 
+# ---- duplicate detection (perceptual hash, stdlib + ffmpeg only) ----
+
+def average_hash_from_gray(data):
+    """64-byte 8x8 grayscale frame -> 64-bit average hash (int). Bit = 1 when the pixel
+    is brighter than the frame mean. Pure function, no ffmpeg — unit-testable."""
+    px = bytes(data[:64])
+    if len(px) < 64:
+        return None
+    mean = sum(px) / 64.0
+    h = 0
+    for i, v in enumerate(px):
+        if v > mean:
+            h |= 1 << (63 - i)
+    return h
+
+
+def hamming_distance(a, b):
+    """Bits differing between two average hashes."""
+    return bin(int(a) ^ int(b)).count("1")
+
+
+def frame_gray_bytes(mp4, at_secs, size=8, exe=None):
+    """One frame at at_secs, downscaled to size x size grayscale raw bytes (size*size bytes),
+    or None when ffmpeg cannot read it."""
+    import subprocess
+    exe = exe or ffmpeg_exe()
+    p = subprocess.run([exe, "-hide_banner", "-nostats", "-y", "-ss", str(at_secs), "-i", str(mp4),
+                        "-frames:v", "1", "-vf", f"scale={size}:{size},format=gray", "-f", "rawvideo", "-"],
+                       capture_output=True)
+    if p.returncode != 0 or len(p.stdout) < size * size:
+        return None
+    return p.stdout[:size * size]
+
+
+def clip_hashes(mp4, times=(5, 15, 25)):
+    """Average hashes sampled at the given seconds into the clip. [] when unreadable."""
+    out = []
+    for t in times:
+        gray = frame_gray_bytes(mp4, t)
+        if gray is not None:
+            h = average_hash_from_gray(gray)
+            if h is not None:
+                out.append(h)
+    return out
+
+
+def is_duplicate(new_hashes, existing_hashes, threshold=6, min_matching_frames=2):
+    """(True, best_distance, matching_frames) when new_hashes look like a near-duplicate
+    of existing_hashes (a list of hash-lists, one per already-cut/posted clip).
+
+    A frame matches when its Hamming distance is <= threshold. Duplicate when at least
+    min_matching_frames frames match (or a single frame matches when either side has
+    only one hash). Returns the smallest distance seen, for the hold reason."""
+    best, best_matches = None, 0
+    for other in existing_hashes or []:
+        if not other or not new_hashes:
+            continue
+        matches, closest = 0, None
+        for h in new_hashes:
+            d = min(hamming_distance(h, o) for o in other)
+            if closest is None or d < closest:
+                closest = d
+            if d <= threshold:
+                matches += 1
+        need = 1 if min(len(new_hashes), len(other)) == 1 else min_matching_frames
+        if matches >= need:
+            return True, closest, matches
+        if closest is not None and (best is None or closest < best):
+            best, best_matches = closest, matches
+    return False, best, best_matches
+
+
+# ---- multi-platform export (manual hand-post kit; no auto-post, no new API) ----
+
+def social_caption(title, description, tags, provenance=None, platform="tiktok"):
+    """Caption for a TikTok / Instagram Reel from the same clip metadata.
+
+    Same 9:16 file, reworded for the platform: title line, the description's sentences
+    (hashtags stripped out), a credit line when the footage source declares one, then
+    3-5 hashtags. Truncated to 2,200 chars (both platforms' caption limit)."""
+    prov = provenance if isinstance(provenance, dict) else {}
+    credit = str(prov.get("credit") or prov.get("source") or "").strip()
+    body = re.sub(r"#\S+", "", str(description or "")).strip()
+    body = re.sub(r"\s+", " ", body).strip()
+    lines = [str(title or "GTA 6").strip()]
+    if body:
+        lines.append(body)
+    if credit:
+        lines.append(f"Footage: {credit}")
+    tags = [str(t).lstrip("#").strip() for t in (tags or []) if str(t).strip()]
+    seen = []
+    for t in tags + ["GTA6", "GTA6Shorts", "Leonida", "ViceCity"]:
+        if t and t not in seen:
+            seen.append(t)
+        if len(seen) >= 5:
+            break
+    lines.append(" ".join(f"#{t}" for t in seen))
+    caption = "\n\n".join(lines)
+    if platform == "instagram":
+        caption = caption + "\n\nFollow @LeonidaAfterDarkPlays for the next guide."
+    return caption[:2200]
+
+
+def platform_status(meta):
+    """{"tiktok": bool, "instagram": bool} from a clip sidecar's posted_platforms map."""
+    posted = (meta or {}).get("posted_platforms") or {}
+    return {"tiktok": bool(posted.get("tiktok")), "instagram": bool(posted.get("instagram"))}
+
+
+# ---- view-count feedback loop (real YouTube API numbers only) ----
+
+FEEDBACK_WINDOWS = [(3600, "1h"), (86400, "24h"), (259200, "72h"), (604800, "7d")]
+
+
+def feedback_path():
+    return BASE / "feedback.json"
+
+
+def load_feedback():
+    try:
+        data = json.loads(feedback_path().read_text(encoding="utf-8"))
+        if isinstance(data, dict) and isinstance(data.get("clips"), dict):
+            return data
+    except (OSError, ValueError):
+        pass
+    return {"clips": {}}
+
+
+def save_feedback(data):
+    BASE.mkdir(parents=True, exist_ok=True)
+    tmp = feedback_path().with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    tmp.replace(feedback_path())
+
+
+def record_feedback_reading(video_id, meta, views, likes=None, comments=None, ts=None):
+    """Record one view-count reading for a posted clip, bucketed to the largest A/B window
+    (1h / 24h / 72h / 7d) the clip's age has reached. One reading per window per clip —
+    a second refresh in the same window is ignored. Returns the window label recorded,
+    or None when no new window was reached. Never invents numbers: only call with real
+    counts from the YouTube API (or real Studio reads, via scripts/feedback_report.py)."""
+    if not video_id:
+        return None
+    ts = float(ts if ts is not None else time.time())
+    posted_at = float((meta or {}).get("posted_at") or 0)
+    if posted_at <= 0:
+        return None
+    age = ts - posted_at
+    window = None
+    for secs, label in FEEDBACK_WINDOWS:
+        if age >= secs:
+            window = label
+    if window is None:
+        return None
+    data = load_feedback()
+    entry = data["clips"].setdefault(video_id, {"title": str((meta or {}).get("title", ""))[:100],
+                                                "file": str((meta or {}).get("file", "")),
+                                                "posted_at": posted_at, "readings": {}, "studio": {}})
+    if window in entry["readings"]:
+        return None
+    reading = {"ts": ts, "views": int(views)}
+    if likes is not None:
+        reading["likes"] = int(likes)
+    if comments is not None:
+        reading["comments"] = int(comments)
+    entry["readings"][window] = reading
+    save_feedback(data)
+    return window
+
+
 def log_skip_log(reason, detail=""):
     """Append a publisher skip to the ledger (data/clips/publisher_skip_log.jsonl)."""
     try:

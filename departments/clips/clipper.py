@@ -141,6 +141,38 @@ def run(task, ctx):
         C.run_ffmpeg(["-ss", str(t0), "-t", str(length), "-i", str(src), "-filter_complex", filt, "-map", out_map, "-map", "0:a?",
                       "-c:v", "libx264", "-preset", "veryfast", "-crf", str(clip.get("crf", 23)), "-c:a", "aac", "-b:a", "160k",
                       "-movflags", "+faststart", str(mp4)])
+        # Duplicate detection: perceptual hash of sampled frames vs every ready/posted clip.
+        # A near-duplicate is HELD (never auto-posted) — re-cut the moment, don't re-upload it.
+        phash, dup_reason = [], None
+        dup_cfg = c.get("duplicates") or {}
+        if dup_cfg.get("enabled", True):
+            try:
+                phash = C.clip_hashes(mp4, tuple(dup_cfg.get("sample_times_secs") or (5, 15, 25)))
+                if phash:
+                    existing, existing_names = [], []
+                    for folder in ("ready", "posted"):
+                        for p in f[folder].glob("*.json"):
+                            m = C.read_clip(p) or {}
+                            if m.get("phash") and m.get("file") != mp4.name:
+                                existing.append(m["phash"])
+                                existing_names.append(m.get("file") or p.stem)
+                    dup, dist, matches = C.is_duplicate(phash, existing,
+                                                        int(dup_cfg.get("hamming_threshold", 6)),
+                                                        int(dup_cfg.get("min_matching_frames", 2)))
+                    if dup:
+                        idx = min(range(len(existing)),
+                                  key=lambda i: min(C.hamming_distance(h, o) for h in phash for o in existing[i]))
+                        dup_reason = (f"duplicate: matches {existing_names[idx]} "
+                                      f"(hamming {dist}, {matches} frame(s))")
+            except Exception as e:
+                ctx.say(f"duplicate check skipped for {name}: {type(e).__name__}")
+        # Multi-platform hand-post kit: TikTok + Instagram captions in a sidecar next to the clip.
+        social_path = f["ready"] / f"{name}.social.txt"
+        social_cfg = c.get("social") or {}
+        title, description, tags = describe(ctx, notes, src.stem, (c.get("post") or {}).get("hashtags") or [], transcript)
+        social_text = ("TIKTOK\n------\n" + C.social_caption(title, description, tags, prov, "tiktok") +
+                       "\n\nINSTAGRAM\n---------\n" + C.social_caption(title, description, tags, prov, "instagram") + "\n")
+        social_path.write_text(social_text, encoding="utf-8")
         # Thumbnail: sharpest frame near the clip midpoint.
         thumb_name = None
         try:
@@ -148,9 +180,10 @@ def run(task, ctx):
             thumb_name = thumb.name
         except Exception as e:
             ctx.say(f"thumbnail skipped for {name}: {type(e).__name__}")
-        title, description, tags = describe(ctx, notes, src.stem, (c.get("post") or {}).get("hashtags") or [], transcript)
         # Blocklist on the finished title too (model output can echo a blocked term).
         held_reasons = list(base_held_reasons)
+        if dup_reason:
+            held_reasons.append(dup_reason)
         title_hits = C.matches_blocklist(f"{title} {description}", block_terms)
         if title_hits:
             held_reasons.append(f"blocklist in title: {', '.join(title_hits)}")
@@ -158,7 +191,8 @@ def run(task, ctx):
         meta_data = {"status": status, "file": mp4.name, "title": title, "description": description, "tags": tags,
                      "source": src.name, "at_secs": round(at, 1), "score_db": round(score, 1), "made_by": ctx.name,
                      "created": time.time(), "attempts": 0, "provenance": prov,
-                     "transcript": transcript[:600], "captions": bool(ass_path), "thumbnail": thumb_name}
+                     "transcript": transcript[:600], "captions": bool(ass_path), "thumbnail": thumb_name,
+                     "phash": phash, "social_sidecar": social_path.name, "posted_platforms": {}}
         if held_reasons:
             meta_data["hold_reason"] = "; ".join(dict.fromkeys(held_reasons))
             C.log_clip_skip(meta_data, meta_data["hold_reason"])
